@@ -108,7 +108,8 @@ def run_rclone_sync(job_id):
         "--verbose",
         "--stats", "2s",
         "--ignore-checksum",
-        "--no-update-modtime"
+        "--no-update-modtime",
+        "--no-traverse"
     ]
     
     try:
