@@ -86,10 +86,7 @@ def run_rclone_sync(job_id):
         "--transfers", "4",
         "--verbose",
         "--stats", "2s",
-        "--s3-object-lock-mode", "COMPLIANCE",
-        "--s3-object-lock-days", "30",
-        # CRUCIAL FOR VERSIONED/LOCKED BUCKETS:
-        "--ignore-checksum", 
+        "--ignore-checksum",
         "--no-update-modtime"
     ]
     
