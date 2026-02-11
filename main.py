@@ -29,9 +29,11 @@ def get_db():
     return conn
 
 def init_db():
-    """Initialize the database schema."""
+    """Initialize schema and automatically fail orphaned jobs from previous sessions."""
     conn = get_db()
     c = conn.cursor()
+    
+    # 1. Ensure Table exists
     c.execute('''
         CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -41,8 +43,20 @@ def init_db():
             logs TEXT
         )
     ''')
+    
+    # 2. Force-fail any job left 'RUNNING' (happens if server crashed/restarted)
+    # This prevents the "Job already in progress" error after a restart.
+    c.execute('''
+        UPDATE jobs 
+        SET status = 'FAILED', 
+            logs = logs || '\n' || ? || ': [SYSTEM] Sync was interrupted by a server restart.',
+            end_time = ?
+        WHERE status = 'RUNNING'
+    ''', (datetime.now().strftime('%H:%M:%S'), datetime.now().isoformat()))
+    
     conn.commit()
     conn.close()
+    logger.info("Database initialized and orphaned jobs cleared.")
 
 def log_job_start():
     """Create a new job record in the database."""
@@ -84,10 +98,9 @@ def log_job_update(job_id, new_log_line=None, status=None):
     conn.close()
 
 def run_rclone_sync(job_id):
-    """Execute the rclone copy command with Object Lock and Versioning flags."""
+    """Execute rclone with Object Lock Compliance flags."""
     global active_process
     
-    # Flags required for Wasabi Compliance Mode (30 days)
     cmd = [
         "rclone", "copy", SOURCE_REMOTE, DEST_REMOTE,
         "--update",
@@ -101,7 +114,6 @@ def run_rclone_sync(job_id):
     ]
     
     try:
-        # Start the process in a new session so we can kill the entire group if cancelled
         active_process = subprocess.Popen(
             cmd, 
             stdout=subprocess.PIPE, 
@@ -118,7 +130,6 @@ def run_rclone_sync(job_id):
             
         active_process.wait()
         
-        # Check if the process was killed externally or finished naturally
         if active_process.returncode == 0:
             final_status = "COMPLETED"
         elif active_process.returncode < 0:
@@ -135,7 +146,7 @@ def run_rclone_sync(job_id):
         active_process = None
 
 async def verify_secret(x_api_key: str = Header(None)):
-    """Simple API Key verification."""
+    """API Key verification."""
     if x_api_key != API_SECRET:
         raise HTTPException(status_code=401, detail="Invalid Secret")
 
@@ -149,7 +160,7 @@ def health():
 
 @app.post("/sync", dependencies=[Depends(verify_secret)])
 async def trigger_sync(background_tasks: BackgroundTasks):
-    """Trigger a new sync job if one isn't already running."""
+    """Trigger a new sync job."""
     conn = get_db()
     active = conn.execute("SELECT id FROM jobs WHERE status = 'RUNNING'").fetchone()
     conn.close()
@@ -163,21 +174,20 @@ async def trigger_sync(background_tasks: BackgroundTasks):
 
 @app.post("/cancel", dependencies=[Depends(verify_secret)])
 async def cancel_sync():
-    """Immediately terminates the running rclone process group."""
+    """Terminate the running rclone process group."""
     global active_process
     if not active_process:
         return {"status": "ignored", "message": "No active sync to cancel."}
     
     try:
-        # Kill the entire process group (rclone and any children)
         os.killpg(os.getpgid(active_process.pid), signal.SIGTERM)
-        return {"status": "success", "message": "Sync cancellation signal sent."}
+        return {"status": "success", "message": "Cancellation signal sent."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 @app.get("/status", dependencies=[Depends(verify_secret)])
 def get_status(history: bool = Query(False)):
-    """Retrieve the latest job status or the full job history."""
+    """Latest status or full history."""
     conn = get_db()
     if history:
         jobs = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 20").fetchall()
@@ -186,11 +196,7 @@ def get_status(history: bool = Query(False)):
     
     job = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
-    
-    if not job:
-        return {"status": "IDLE"}
-        
-    return dict(job)
+    return dict(job) if job else {"status": "IDLE"}
 
 if __name__ == "__main__":
     import uvicorn
