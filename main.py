@@ -196,6 +196,19 @@ def get_status(history: bool = Query(False)):
     conn.close()
     return dict(job) if job else {"status": "IDLE"}
 
+@app.post("/clear-history", dependencies=[Depends(verify_secret)])
+async def clear_history():
+    """Deletes all job records from the database."""
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM jobs")
+        conn.commit()
+        return {"status": "success", "message": "History cleared successfully."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        conn.close()    
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
