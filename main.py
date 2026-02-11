@@ -80,19 +80,17 @@ def log_job_update(job_id, new_log_line=None, status=None):
 
 # --- BACKGROUND WORKER ---
 def run_rclone_sync(job_id):
-    logger.info(f"Starting sync job {job_id}")
-    
-    # --- SAFETY CHECK ---
-    # The order of arguments strictly defines the direction.
-    # rclone copy <SOURCE> <DESTINATION>
     cmd = [
-        "rclone", "copy", 
-        SOURCE_REMOTE,  # FROM: Dropbox
-        DEST_REMOTE,    # TO: Wasabi
-        "--update",     # Skip files that are already newer on Wasabi
+        "rclone", "copy", SOURCE_REMOTE, DEST_REMOTE,
+        "--update",
         "--transfers", "4",
         "--verbose",
-        "--stats", "2s"
+        "--stats", "2s",
+        "--s3-object-lock-mode", "COMPLIANCE",
+        "--s3-object-lock-days", "30",
+        # CRUCIAL FOR VERSIONED/LOCKED BUCKETS:
+        "--ignore-checksum", 
+        "--no-update-modtime"
     ]
     
     try:
