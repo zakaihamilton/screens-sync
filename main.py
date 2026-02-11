@@ -2,9 +2,9 @@ import os
 import subprocess
 import sqlite3
 import logging
+import signal
 from datetime import datetime
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends, Query
-from pydantic import BaseModel
 
 # Configuration from Environment Variables
 DB_PATH = "/app/data/sync.db"
@@ -17,6 +17,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sync-worker")
 
 app = FastAPI()
+
+# Global variable to track the active process for cancellation
+active_process = None
 
 def get_db():
     """Ensure the data directory exists and connect to SQLite."""
@@ -69,7 +72,7 @@ def log_job_update(job_id, new_log_line=None, status=None):
     if status:
         updates.append("status = ?")
         params.append(status)
-        if status in ['COMPLETED', 'FAILED']:
+        if status in ['COMPLETED', 'FAILED', 'CANCELLED']:
             updates.append("end_time = ?")
             params.append(datetime.now().isoformat())
             
@@ -82,7 +85,9 @@ def log_job_update(job_id, new_log_line=None, status=None):
 
 def run_rclone_sync(job_id):
     """Execute the rclone copy command with Object Lock and Versioning flags."""
-    # Note: Using flags that respect Wasabi Compliance Mode (30 days)
+    global active_process
+    
+    # Flags required for Wasabi Compliance Mode (30 days)
     cmd = [
         "rclone", "copy", SOURCE_REMOTE, DEST_REMOTE,
         "--update",
@@ -92,32 +97,42 @@ def run_rclone_sync(job_id):
         "--ignore-checksum",
         "--no-update-modtime",
         "--s3-object-lock-mode", "COMPLIANCE",
-        "--s3-object-lock-days", "30"        
+        "--s3-object-lock-days", "30"
     ]
     
     try:
-        process = subprocess.Popen(
+        # Start the process in a new session so we can kill the entire group if cancelled
+        active_process = subprocess.Popen(
             cmd, 
             stdout=subprocess.PIPE, 
             stderr=subprocess.STDOUT, 
             text=True, 
-            bufsize=1
+            bufsize=1,
+            start_new_session=True
         )
         
-        for line in process.stdout:
-            # We log to terminal and the DB simultaneously
+        for line in active_process.stdout:
             clean_line = line.strip()
             print(clean_line)
             log_job_update(job_id, new_log_line=clean_line)
             
-        process.wait()
+        active_process.wait()
         
-        final_status = "COMPLETED" if process.returncode == 0 else "FAILED"
-        log_job_update(job_id, new_log_line=f"Exit code: {process.returncode}", status=final_status)
+        # Check if the process was killed externally or finished naturally
+        if active_process.returncode == 0:
+            final_status = "COMPLETED"
+        elif active_process.returncode < 0:
+            final_status = "CANCELLED"
+        else:
+            final_status = "FAILED"
+            
+        log_job_update(job_id, new_log_line=f"Exit code: {active_process.returncode}", status=final_status)
         
     except Exception as e:
         logger.error(f"Execution Error: {str(e)}")
         log_job_update(job_id, new_log_line=f"CRITICAL ERROR: {str(e)}", status="FAILED")
+    finally:
+        active_process = None
 
 async def verify_secret(x_api_key: str = Header(None)):
     """Simple API Key verification."""
@@ -146,17 +161,29 @@ async def trigger_sync(background_tasks: BackgroundTasks):
     background_tasks.add_task(run_rclone_sync, job_id)
     return {"status": "started", "job_id": job_id}
 
+@app.post("/cancel", dependencies=[Depends(verify_secret)])
+async def cancel_sync():
+    """Immediately terminates the running rclone process group."""
+    global active_process
+    if not active_process:
+        return {"status": "ignored", "message": "No active sync to cancel."}
+    
+    try:
+        # Kill the entire process group (rclone and any children)
+        os.killpg(os.getpgid(active_process.pid), signal.SIGTERM)
+        return {"status": "success", "message": "Sync cancellation signal sent."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.get("/status", dependencies=[Depends(verify_secret)])
 def get_status(history: bool = Query(False)):
     """Retrieve the latest job status or the full job history."""
     conn = get_db()
     if history:
-        # Return last 20 jobs for the History Tab
         jobs = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 20").fetchall()
         conn.close()
         return [dict(j) for j in jobs]
     
-    # Return only the most recent job
     job = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
     
@@ -167,6 +194,5 @@ def get_status(history: bool = Query(False)):
 
 if __name__ == "__main__":
     import uvicorn
-    # Use PORT env var if provided by Railway
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
