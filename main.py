@@ -10,9 +10,8 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends, Qu
 # Configuration from Environment Variables
 DB_PATH = "/app/data/sync.db"
 API_SECRET = os.getenv("API_SECRET")
-# Ensure these match your Railway variable names for consistency
+# Source remains Dropbox
 SOURCE_REMOTE = os.getenv("DROPBOX_SOURCE_PATH", "dropbox:sessions") 
-DEST_REMOTE = os.getenv("WASABI_DEST_PATH", "wasabi:systemconcepts-sessions")
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -56,7 +55,8 @@ def init_db():
 def log_job_start():
     conn = get_db()
     c = conn.cursor()
-    initial_log = f"🚀 Job Started: {SOURCE_REMOTE} -> {DEST_REMOTE}\n"
+    # Log that we are starting a multi-destination sync
+    initial_log = f"🚀 Job Started: {SOURCE_REMOTE} -> Redundant Destinations\n"
     c.execute(
         "INSERT INTO jobs (start_time, status, logs) VALUES (?, ?, ?)", 
         (datetime.now().isoformat(), 'RUNNING', initial_log)
@@ -88,56 +88,68 @@ def log_job_update(job_id, new_log_line=None, status=None):
     conn.close()
 
 def run_rclone_sync(job_id, dynamic_token: str = None):
-    """Execute rclone using an optional short-lived token from Vercel."""
+    """Execute rclone for multiple destinations for redundancy."""
     global active_process
     
-    # Clone current environment and inject the token if provided
     env = os.environ.copy()
     if dynamic_token:
-        # Rclone expects the 'token' field to be a JSON blob. 
-        # Even without a refresh token, this format works for short-lived access.
         token_blob = json.dumps({
             "access_token": dynamic_token,
             "token_type": "bearer",
-            "expiry": "2030-01-01T00:00:00Z" # Set far future so rclone doesn't try to refresh
+            "expiry": "2030-01-01T00:00:00Z" 
         })
-        # Note: Remote name 'dropbox' must match the prefix in SOURCE_REMOTE (e.g., dropbox:sessions)
         env["RCLONE_CONFIG_DROPBOX_TOKEN"] = token_blob
         logger.info("Syncing with dynamic token from Vercel...")
 
-    cmd = [
-        "rclone", "copy", SOURCE_REMOTE, DEST_REMOTE,
-        "--update",
-        "--transfers", "4",
-        "--verbose",
-        "--stats", "2s",
-        "--ignore-checksum",
-        "--no-update-modtime",
-        "--no-traverse"
+    # Define destinations for the "Double S3" strategy
+    destinations = [
+        os.getenv("WASABI_DEST_PATH", "wasabi:systemconcepts-sessions"),
+        os.getenv("IDRIVE_DEST_PATH", "idrive_e2:systemconcepts-sessions")
     ]
     
     try:
-        active_process = subprocess.Popen(
-            cmd, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.STDOUT, 
-            text=True, 
-            bufsize=1,
-            start_new_session=True,
-            env=env
-        )
-        
-        for line in active_process.stdout:
-            clean_line = line.strip()
-            print(clean_line)
-            log_job_update(job_id, new_log_line=clean_line)
+        for dest in destinations:
+            if not dest:
+                continue
+                
+            log_job_update(job_id, new_log_line=f"--- Starting Sync to {dest} ---")
             
-        active_process.wait()
-        
-        status_map = {0: "COMPLETED", -15: "CANCELLED"} # -15 is SIGTERM
-        final_status = status_map.get(active_process.returncode, "FAILED")
+            cmd = [
+                "rclone", "copy", SOURCE_REMOTE, dest,
+                "--update",
+                "--transfers", "4",
+                "--verbose",
+                "--stats", "2s",
+                "--ignore-checksum",
+                "--no-update-modtime",
+                "--no-traverse"
+            ]
             
-        log_job_update(job_id, new_log_line=f"Exit code: {active_process.returncode}", status=final_status)
+            active_process = subprocess.Popen(
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT, 
+                text=True, 
+                bufsize=1,
+                start_new_session=True,
+                env=env
+            )
+            
+            for line in active_process.stdout:
+                clean_line = line.strip()
+                print(clean_line)
+                log_job_update(job_id, new_log_line=clean_line)
+                
+            active_process.wait()
+            
+            if active_process.returncode != 0:
+                status_map = {-15: "CANCELLED"}
+                final_status = status_map.get(active_process.returncode, "FAILED")
+                log_job_update(job_id, new_log_line=f"Error in sync to {dest}. Code: {active_process.returncode}", status=final_status)
+                return # Stop the sequence if one destination fails
+
+        # If all loops finish successfully
+        log_job_update(job_id, new_log_line="All redundant syncs finished successfully.", status="COMPLETED")
         
     except Exception as e:
         logger.error(f"Execution Error: {str(e)}")
@@ -159,7 +171,6 @@ def health():
 
 @app.post("/sync", dependencies=[Depends(verify_secret)])
 async def trigger_sync(background_tasks: BackgroundTasks, x_db_token: str = Header(None)):
-    """Trigger a sync, optionally passing the Dropbox access token in x-db-token header."""
     conn = get_db()
     active = conn.execute("SELECT id FROM jobs WHERE status = 'RUNNING'").fetchone()
     conn.close()
