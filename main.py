@@ -10,16 +10,12 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends, Qu
 # Configuration from Environment Variables
 DB_PATH = "/app/data/sync.db"
 API_SECRET = os.getenv("API_SECRET")
-# Source remains Dropbox
 SOURCE_REMOTE = os.getenv("DROPBOX_SOURCE_PATH", "dropbox:sessions") 
 
-# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sync-worker")
 
 app = FastAPI()
-
-# Global variable to track the active process for cancellation
 active_process = None
 
 def get_db():
@@ -40,7 +36,6 @@ def init_db():
             logs TEXT
         )
     ''')
-    # Clear orphaned jobs from previous crashes/restarts
     c.execute('''
         UPDATE jobs 
         SET status = 'FAILED', 
@@ -50,16 +45,13 @@ def init_db():
     ''', (datetime.now().strftime('%H:%M:%S'), datetime.now().isoformat()))
     conn.commit()
     conn.close()
-    logger.info("Database initialized.")
 
 def log_job_start():
     conn = get_db()
     c = conn.cursor()
     initial_log = f"🚀 Job Started: {SOURCE_REMOTE} -> Redundant Destinations\n"
-    c.execute(
-        "INSERT INTO jobs (start_time, status, logs) VALUES (?, ?, ?)", 
-        (datetime.now().isoformat(), 'RUNNING', initial_log)
-    )
+    c.execute("INSERT INTO jobs (start_time, status, logs) VALUES (?, ?, ?)", 
+              (datetime.now().isoformat(), 'RUNNING', initial_log))
     job_id = c.lastrowid
     conn.commit()
     conn.close()
@@ -87,9 +79,7 @@ def log_job_update(job_id, new_log_line=None, status=None):
     conn.close()
 
 def run_rclone_sync(job_id, dynamic_token: str = None):
-    """Execute rclone for multiple destinations for redundancy."""
     global active_process
-    
     env = os.environ.copy()
     if dynamic_token:
         token_blob = json.dumps({
@@ -98,7 +88,6 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
             "expiry": "2030-01-01T00:00:00Z" 
         })
         env["RCLONE_CONFIG_DROPBOX_TOKEN"] = token_blob
-        logger.info("Syncing with dynamic token from Vercel...")
 
     destinations = [
         os.getenv("WASABI_DEST_PATH", "wasabi:systemconcepts-sessions"),
@@ -108,61 +97,44 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
     try:
         success_count = 0
         for dest in destinations:
-            if not dest:
-                continue
-                
+            if not dest: continue
             log_job_update(job_id, new_log_line=f"--- Starting Sync to {dest} ---")
             
+            # REVERTED TO WORKING FLAGS
             cmd = [
                 "rclone", "copy", SOURCE_REMOTE, dest,
                 "--update",
-                "--transfers", "8",        # Increased for better media throughput
-                "--size-only",             # Fast, safe alternative to ignoring checksums
-                "--fast-list",             # Dramatic speedup for 14,000+ files
-                "--s3-no-check-bucket",    # Reduces unnecessary API calls/potential 403s
+                "--transfers", "4",
                 "--verbose",
-                "--stats", "5s",
+                "--stats", "2s",
+                "--ignore-checksum",
+                "--no-update-modtime",
                 "--no-traverse"
             ]
-
+            
             active_process = subprocess.Popen(
-                cmd, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT, 
-                text=True, 
-                bufsize=1,
-                start_new_session=True,
-                env=env
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
+                text=True, bufsize=1, start_new_session=True, env=env
             )
             
-            # Read output in real-time
             for line in active_process.stdout:
                 clean_line = line.strip()
                 print(clean_line)
                 log_job_update(job_id, new_log_line=clean_line)
                 
-            active_process.wait()
+            active_process.wait() # FIXED: Outside the loop
             
             if active_process.returncode != 0:
-                status_map = {-15: "CANCELLED"}
-                error_status = status_map.get(active_process.returncode, "FAILED_PARTIAL")
                 log_job_update(job_id, new_log_line=f"❌ Error in sync to {dest}. Code: {active_process.returncode}")
-                # We continue to the next destination instead of returning
-                continue 
+                continue # FIXED: Try next destination
             
             success_count += 1
             log_job_update(job_id, new_log_line=f"✅ Finished Sync to {dest}")
 
-        # Finalize job status based on whether any destination succeeded
-        if success_count > 0:
-            final_status = "COMPLETED"
-        else:
-            final_status = "FAILED"
-            
+        final_status = "COMPLETED" if success_count > 0 else "FAILED"
         log_job_update(job_id, new_log_line=f"Job sequence finished. Successes: {success_count}/{len(destinations)}", status=final_status)
         
     except Exception as e:
-        logger.error(f"Execution Error: {str(e)}")
         log_job_update(job_id, new_log_line=f"CRITICAL ERROR: {str(e)}", status="FAILED")
     finally:
         active_process = None
@@ -184,10 +156,8 @@ async def trigger_sync(background_tasks: BackgroundTasks, x_db_token: str = Head
     conn = get_db()
     active = conn.execute("SELECT id FROM jobs WHERE status = 'RUNNING'").fetchone()
     conn.close()
-    
     if active:
         return {"status": "ignored", "message": "A sync job is already in progress.", "job_id": active['id']}
-    
     job_id = log_job_start()
     background_tasks.add_task(run_rclone_sync, job_id, x_db_token)
     return {"status": "started", "job_id": job_id}
@@ -195,14 +165,11 @@ async def trigger_sync(background_tasks: BackgroundTasks, x_db_token: str = Head
 @app.post("/cancel", dependencies=[Depends(verify_secret)])
 async def cancel_sync():
     global active_process
-    if not active_process:
-        return {"status": "ignored", "message": "No active sync to cancel."}
+    if not active_process: return {"status": "ignored", "message": "No active sync to cancel."}
     try:
-        # Kill the entire process group
         os.killpg(os.getpgid(active_process.pid), signal.SIGTERM)
         return {"status": "success", "message": "Cancellation signal sent."}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    except Exception as e: return {"status": "error", "message": str(e)}
 
 @app.get("/status", dependencies=[Depends(verify_secret)])
 def get_status(history: bool = Query(False)):
@@ -217,5 +184,4 @@ def get_status(history: bool = Query(False)):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
