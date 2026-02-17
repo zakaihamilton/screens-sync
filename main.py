@@ -116,15 +116,15 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
             cmd = [
                 "rclone", "copy", SOURCE_REMOTE, dest,
                 "--update",
-                "--transfers", "4",
+                "--transfers", "8",        # Increased for better media throughput
+                "--size-only",             # Fast, safe alternative to ignoring checksums
+                "--fast-list",             # Dramatic speedup for 14,000+ files
+                "--s3-no-check-bucket",    # Reduces unnecessary API calls/potential 403s
                 "--verbose",
-                "--stats", "2s",
-                "--no-traverse",
-                "--s3-no-check-bucket", # Prevents some 403s on bucket initialization
-                "--ignore-checksum",
-                "--no-update-modtime"
+                "--stats", "5s",
+                "--no-traverse"
             ]
-            
+
             active_process = subprocess.Popen(
                 cmd, 
                 stdout=subprocess.PIPE, 
