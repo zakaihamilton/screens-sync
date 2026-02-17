@@ -55,7 +55,6 @@ def init_db():
 def log_job_start():
     conn = get_db()
     c = conn.cursor()
-    # Log that we are starting a multi-destination sync
     initial_log = f"🚀 Job Started: {SOURCE_REMOTE} -> Redundant Destinations\n"
     c.execute(
         "INSERT INTO jobs (start_time, status, logs) VALUES (?, ?, ?)", 
@@ -101,13 +100,13 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
         env["RCLONE_CONFIG_DROPBOX_TOKEN"] = token_blob
         logger.info("Syncing with dynamic token from Vercel...")
 
-    # Define destinations for the "Double S3" strategy
     destinations = [
         os.getenv("WASABI_DEST_PATH", "wasabi:systemconcepts-sessions"),
         os.getenv("IDRIVE_DEST_PATH", "idrive_e2:systemconcepts-sessions")
     ]
     
     try:
+        success_count = 0
         for dest in destinations:
             if not dest:
                 continue
@@ -120,9 +119,10 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
                 "--transfers", "4",
                 "--verbose",
                 "--stats", "2s",
+                "--no-traverse",
+                "--s3-no-check-bucket", # Prevents some 403s on bucket initialization
                 "--ignore-checksum",
-                "--no-update-modtime",
-                "--no-traverse"
+                "--no-update-modtime"
             ]
             
             active_process = subprocess.Popen(
@@ -135,6 +135,7 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
                 env=env
             )
             
+            # Read output in real-time
             for line in active_process.stdout:
                 clean_line = line.strip()
                 print(clean_line)
@@ -144,12 +145,21 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
             
             if active_process.returncode != 0:
                 status_map = {-15: "CANCELLED"}
-                final_status = status_map.get(active_process.returncode, "FAILED")
-                log_job_update(job_id, new_log_line=f"Error in sync to {dest}. Code: {active_process.returncode}", status=final_status)
-                return # Stop the sequence if one destination fails
+                error_status = status_map.get(active_process.returncode, "FAILED_PARTIAL")
+                log_job_update(job_id, new_log_line=f"❌ Error in sync to {dest}. Code: {active_process.returncode}")
+                # We continue to the next destination instead of returning
+                continue 
+            
+            success_count += 1
+            log_job_update(job_id, new_log_line=f"✅ Finished Sync to {dest}")
 
-        # If all loops finish successfully
-        log_job_update(job_id, new_log_line="All redundant syncs finished successfully.", status="COMPLETED")
+        # Finalize job status based on whether any destination succeeded
+        if success_count > 0:
+            final_status = "COMPLETED"
+        else:
+            final_status = "FAILED"
+            
+        log_job_update(job_id, new_log_line=f"Job sequence finished. Successes: {success_count}/{len(destinations)}", status=final_status)
         
     except Exception as e:
         logger.error(f"Execution Error: {str(e)}")
@@ -188,6 +198,7 @@ async def cancel_sync():
     if not active_process:
         return {"status": "ignored", "message": "No active sync to cancel."}
     try:
+        # Kill the entire process group
         os.killpg(os.getpgid(active_process.pid), signal.SIGTERM)
         return {"status": "success", "message": "Cancellation signal sent."}
     except Exception as e:
