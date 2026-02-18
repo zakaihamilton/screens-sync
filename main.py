@@ -107,7 +107,6 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
                 "--fast-list",             # Crucial: Fetches 1,000 files per call
                 "--checkers", "128",       # Parallelize the metadata scan
                 "--transfers", "4",        # Keep uploads stable to avoid bandwidth choke
-                "--tpslimit", "25",        # THE CHANGE: Faster API headroom
                 "--verbose",
                 "--stats", "10s",
                 "--no-traverse",           # Don't list the destination recursively
