@@ -103,14 +103,14 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
             cmd = [
                 "rclone", "copy", SOURCE_REMOTE, dest,
                 "--update",
-                "--size-only",             # Instant check by size; skips slow checksums
-                "--fast-list",             # Batches 1,000 files per API call (crucial for 36k+ files)
-                "--checkers", "128",       # Drastically parallelize directory scanning
-                "--transfers", "4",        # Keep concurrent uploads stable
-                "--tpslimit", "12",        # Moderate headroom to prevent 403s
+                "--size-only",             # Crucial: Instant comparison
+                "--fast-list",             # Crucial: Fetches 1,000 files per call
+                "--checkers", "128",       # Parallelize the metadata scan
+                "--transfers", "4",        # Keep uploads stable to avoid bandwidth choke
+                "--tpslimit", "25",        # THE CHANGE: Faster API headroom
                 "--verbose",
                 "--stats", "10s",
-                "--no-traverse",           # Prevents slow recursive destination listing
+                "--no-traverse",           # Don't list the destination recursively
                 "--ignore-checksum",
                 "--no-update-modtime"
             ]
