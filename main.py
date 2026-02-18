@@ -100,13 +100,14 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
             if not dest: continue
             log_job_update(job_id, new_log_line=f"--- Starting Sync to {dest} ---")
             
-            # REVERTED TO WORKING FLAGS
             cmd = [
                 "rclone", "copy", SOURCE_REMOTE, dest,
                 "--update",
-                "--transfers", "4",
+                "--transfers", "2",              # Reduced from 4 or 8 to lower API pressure
+                "--checkers", "4",               # Limits how many files are "checked" at once
+                "--tpslimit", "5",                # Limits Transactions Per Second to Wasabi
                 "--verbose",
-                "--stats", "2s",
+                "--stats", "10s",
                 "--ignore-checksum",
                 "--no-update-modtime",
                 "--no-traverse"
