@@ -103,11 +103,13 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
             cmd = [
                 "rclone", "copy", SOURCE_REMOTE, dest,
                 "--update",
-                "--transfers", "2",              # Reduced from 4 or 8 to lower API pressure
-                "--checkers", "4",               # Limits how many files are "checked" at once
-                "--tpslimit", "5",                # Limits Transactions Per Second to Wasabi
+                "--transfers", "4",          # Faster parallel uploads
+                "--checkers", "16",          # Faster directory scanning
+                "--tpslimit", "10",          # Moderate API limit (Wasabi friendly)
+                "--s3-chunk-size", "64M",    # Optimized for your media files
+                "--fast-list",               # Vital for speed with 36,000+ files
                 "--verbose",
-                "--stats", "10s",
+                "--stats", "5s",
                 "--ignore-checksum",
                 "--no-update-modtime",
                 "--no-traverse"
