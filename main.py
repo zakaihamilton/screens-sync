@@ -103,16 +103,15 @@ def run_rclone_sync(job_id, dynamic_token: str = None):
             cmd = [
                 "rclone", "copy", SOURCE_REMOTE, dest,
                 "--update",
-                "--transfers", "4",          # Faster parallel uploads
-                "--checkers", "16",          # Faster directory scanning
-                "--tpslimit", "10",          # Moderate API limit (Wasabi friendly)
-                "--s3-chunk-size", "64M",    # Optimized for your media files
-                "--fast-list",               # Vital for speed with 36,000+ files
+                "--size-only",             # Instant check by size
+                "--fast-list",             # Batch API calls
+                "--checkers", "128",       # Parallelize directory scanning
+                "--transfers", "4",        # Keep uploads moderate
                 "--verbose",
-                "--stats", "5s",
+                "--stats", "10s",
+                "--no-traverse",           # Don't list the destination recursively
                 "--ignore-checksum",
-                "--no-update-modtime",
-                "--no-traverse"
+                "--no-update-modtime"
             ]
             
             active_process = subprocess.Popen(
